@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>🐒 لعبة القِرد — واجهة مُحسّنة (Responsive)</title>
+  <title>🐒 لعبة القِرد — واجهة مُصلّحة (3-4 players)</title>
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;600;700&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
   <style>
     :root{
@@ -179,11 +179,11 @@
     </footer>
   </div>
 
-  <!-- Firebase v10+ (modular) - نفس السكريبت واللوجيك القديم لكي لا نكسر الوظائف -->
+  <!-- Firebase v10+ (modular) - نفس السكريبت واللوجيك القديم مع تصليحات -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
     import { getAuth, onAuthStateChanged, signInAnonymously, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
-    import { getDatabase, ref, onValue, set, update, get, push, serverTimestamp, child, onDisconnect, remove, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-database.js";
+    import { getDatabase, ref, onValue, set, update, get, push, serverTimestamp, onDisconnect, remove, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-database.js";
 
     // —— إعداداتك ——
     const firebaseConfig = {
@@ -240,25 +240,42 @@
     let ROOM = null; // كود الغرفة
     let roomRef = null;
 
-    // —— Auth مجهول ——
+    // —— Auth مجهول مع معالجة الخطأ (fallback تطويري) ——
     onAuthStateChanged(auth, async user => {
       if(user){
         UID = user.uid;
         meId.textContent = UID.slice(0,8);
         displayName.value = user.displayName || '';
         meName.textContent = user.displayName || 'بدون اسم';
+        console.log('[Auth] signed in uid=', UID);
       } else {
-        await signInAnonymously(auth);
+        try{
+          await signInAnonymously(auth);
+        }catch(err){
+          console.error('[Auth] signInAnonymously failed:', err);
+          alert('تعذر تسجيل الدخول المجهول إلى Firebase. فعّل Anonymous Sign-in من Firebase Console ثم أعد التحميل. (وضع تجريبي متاح)');
+          // fallback dev UID — للتطوير فقط
+          const fakeUid = 'dev-' + Math.random().toString(36).slice(2,10);
+          UID = fakeUid;
+          meId.textContent = UID.slice(0,8);
+          meName.textContent = 'مطور (تجريبي)';
+          displayName.value = 'مطور';
+          console.warn('[Auth] using DEV fallback UID=', UID);
+        }
       }
     });
 
     saveName.onclick = async ()=>{
       const name = (displayName.value || '').trim().slice(0,20) || 'لاعب';
-      await updateProfile(auth.currentUser, { displayName: name });
+      try{
+        if(auth.currentUser){
+          await updateProfile(auth.currentUser, { displayName: name });
+        }
+      }catch(e){ console.warn('[saveName] updateProfile failed', e); }
       meName.textContent = name;
       log('تم حفظ اسمك.');
-      if(ROOM){
-        await update(ref(db, `rooms/${ROOM}/players/${UID}`), { name });
+      if(ROOM && UID){
+        try{ await update(ref(db, `rooms/${ROOM}/players/${UID}`), { name }); }catch(e){ console.warn('[saveName] db update failed', e); }
       }
     };
 
@@ -272,7 +289,7 @@
     async function createRoomFlow(){
       const code = codeGen();
       const now = Date.now();
-      const name = auth.currentUser?.displayName || 'لاعب';
+      const name = displayName.value || auth.currentUser?.displayName || 'لاعب';
       const data = {
         code,
         createdAt: now,
@@ -289,55 +306,89 @@
       await joinRoom(code);
     }
 
+    // --- joinRoom: إصلاحات ---
     async function joinRoom(codeRaw){
-      const code = (codeRaw || roomCodeInput.value).toUpperCase();
-      if(!code || code.length!==6){ alert('أدخل كود غرفة صالح (٦ أحرف).'); return; }
-      const snap = await get(ref(db, `rooms/${code}`));
-      if(!snap.exists()) { alert('الغرفة غير موجودة.'); return; }
-      const room = snap.val();
-      const playersSnap = await get(ref(db, `rooms/${code}/players`));
-      const players = playersSnap.exists()? playersSnap.val(): {};
-      const pCount = Object.keys(players).length;
-      if(pCount>=4 && !players[UID]){ alert('الغرفة ممتلئة (٤ لاعبين كحد أقصى).'); return; }
+      try{
+        const code = (codeRaw || roomCodeInput.value).toUpperCase();
+        if(!code || code.length!==6){ alert('أدخل كود غرفة صالح (٦ أحرف).'); return; }
+        const snap = await get(ref(db, `rooms/${code}`));
+        if(!snap.exists()) { alert('الغرفة غير موجودة.'); return; }
+        const room = snap.val();
 
-      const name = auth.currentUser?.displayName || 'لاعب';
-      await update(ref(db, `rooms/${code}/players/${UID}`), {
-        name, quarters: players[UID]?.quarters ?? 0, joinedAt: serverTimestamp(), online: true
-      });
-      await runTransaction(ref(db, `rooms/${code}/order`), (order)=>{
-        order = order || [];
-        if(!order.includes(UID)){
-          if(order.length>=4) return order;
-          order.push(UID);
-        }
-        return order;
-      });
-      const pRef = ref(db, `rooms/${code}/players/${UID}`);
-      onDisconnect(pRef).remove();
-      const oRef = ref(db, `rooms/${code}/order`);
-      onDisconnect(oRef).set(null);
+        const playersSnap = await get(ref(db, `rooms/${code}/players`));
+        const players = playersSnap.exists()? playersSnap.val(): {};
+        const pCount = Object.keys(players).length;
+        if(pCount>=4 && !players[UID]){ alert('الغرفة ممتلئة (٤ لاعبين كحد أقصى).'); return; }
 
-      ROOM = code; roomRef = ref(db, `rooms/${ROOM}`);
-      roomCodeView.textContent = ROOM;
+        const name = displayName.value || auth.currentUser?.displayName || 'لاعب';
+        // كتابة معلومات اللاعب (set لضمان وجود الحقل joinedAt)
+        await set(ref(db, `rooms/${code}/players/${UID}`), {
+          name,
+          quarters: players[UID]?.quarters ?? 0,
+          joinedAt: serverTimestamp(),
+          online: true
+        });
 
-      subscribeRoom();
-      log(`انضممت للغرفة ${ROOM}.`);
+        // أضف UID إلى order بترانزاكشن — لا نستخدم onDisconnect على order
+        await runTransaction(ref(db, `rooms/${code}/order`), (order)=>{
+          order = Array.isArray(order)? order.filter(Boolean) : [];
+          if(!order.includes(UID)){
+            if(order.length >= 4) return order; // منع اللاعب الخامس
+            order.push(UID);
+          }
+          return order;
+        });
+
+        // onDisconnect على node اللاعب فقط
+        const pRef = ref(db, `rooms/${code}/players/${UID}`);
+        onDisconnect(pRef).remove();
+
+        ROOM = code; roomRef = ref(db, `rooms/${ROOM}`);
+        roomCodeView.textContent = ROOM;
+
+        subscribeRoom();
+        log(`انضممت للغرفة ${ROOM}.`);
+        console.log('[joinRoom] joined', ROOM);
+      }catch(err){
+        console.error('[joinRoom] error', err);
+        alert('حدث خطأ أثناء الانضمام — راجع الكونسول.');
+      }
     }
 
+    // --- renderPlayers: بناء order احتياطياً لو فاضي ---
     function renderPlayers(room){
-      const order = room.order || [];
       const pls = room.players || {};
+      let order = Array.isArray(room.order) ? (room.order || []) : [];
+
+      if((!order || order.length === 0) && Object.keys(pls).length > 0){
+        // حاول ترتيب اللاعبين حسب joinedAt إن وُجد، وإلا استخدم مفاتيح اللاعب
+        try{
+          const entries = Object.entries(pls).map(([id,p])=> ({ id, joinedAt: p.joinedAt || 0 }));
+          entries.sort((a,b)=> (a.joinedAt || 0) - (b.joinedAt || 0));
+          order = entries.map(e=> e.id);
+          console.log('[renderPlayers] rebuilt order from players keys:', order);
+        }catch(e){
+          order = Object.keys(pls);
+        }
+      }
+
       playersEl.innerHTML = '';
       for(const id of order){
         const p = pls[id]; if(!p) continue;
         const el = document.createElement('div');
         el.className = 'p';
-        const isTurn = room.status==='playing' && order[room.turnIndex]===id;
+        const roomStatusVal = room.status || 'lobby';
+        const isTurn = roomStatusVal === 'playing' && Array.isArray(order) && order[room.turnIndex] === id;
         el.innerHTML = `\n          <div class="turn ${isTurn? 'active' : ''}">${isTurn? '🎯 دوره الآن' : '—'}</div>\n          <div style="display:flex;gap:10px;align-items:center">\n            <div class="avatar">${(p.name||'لاعب').slice(0,1)}</div>\n            <div style=\"flex:1\">\n              <h3>${p.name||'لاعب'} ${id===room.host? '👑':''}</h3>\n              <div class=\"tiny\">${id.slice(0,8)} · ${p.online? 'متصل' : 'غير متصل'}</div>\n            </div>\n          </div>\n          <div class=\"quarters\">${[0,1,2,3].map(i=>`<span class=\"q ${p.quarters>i?'on':''}\"></span>`).join('')}</div>\n        `;
         playersEl.appendChild(el);
       }
+
+      if(playersEl.children.length === 0){
+        playersEl.innerHTML = '<div class="tiny" style="opacity:.8">لا يوجد لاعبين مرئيين — افتح الكونسل للفحص.</div>';
+      }
     }
 
+    // --- subscribeRoom مع debug خفيف ---
     let unsubRoom = null;
     function subscribeRoom(){
       if(!ROOM) return;
@@ -346,14 +397,18 @@
       const off = onValue(rRef, (snap)=>{
         if(!snap.exists()) return;
         const room = snap.val();
-        roomStatus.textContent = room.status;
+        console.log('[subscribeRoom] snapshot:', room);
+
+        roomStatus.textContent = room.status || 'lobby';
         hostName.textContent = room.players?.[room.host]?.name || '—';
         renderPlayers(room);
         prefixEl.textContent = room.prefix || '—';
 
-        const order = room.order || [];
-        const isStarter = order[room.starterIndex] === UID;
-        starterPanel.style.display = isStarter && room.status==='playing' ? 'block' : 'none';
+        const order = Array.isArray(room.order)? room.order : [];
+        const orderLen = order.length || Object.keys(room.players||{}).length || 1;
+        const starterIdx = Number.isFinite(room.starterIndex) ? room.starterIndex : 0;
+        const isStarter = order[starterIdx] === UID;
+        starterPanel.style.display = (isStarter && room.status==='playing') ? 'block' : 'none';
 
         if(room.challenge?.active){
           challengeArea.style.display='block';
@@ -361,6 +416,8 @@
         } else {
           challengeArea.style.display='none';
         }
+      }, (err)=>{
+        console.error('[subscribeRoom] onValue error', err);
       });
       unsubRoom = ()=> off();
     }
@@ -369,25 +426,27 @@
       if(!ROOM) return;
       const r = (await get(ref(db, `rooms/${ROOM}`))).val();
       const count = (r.order||[]).length;
-      if(count<3){ alert('لازم ٣ لاعبين على الأقل للبدء.'); return; }
-      if(r.host!==UID){ alert('فقط المضيف يستطيع البدء.'); return; }
-      await update(ref(db, `rooms/${ROOM}`), { status:'playing', turnIndex: r.starterIndex, prefix:'', secret:'', lastActor: null });
+      if(count < 3){ alert('لازم ٣ لاعبين على الأقل للبدء.'); return; }
+      if(r.host !== UID){ alert('فقط المضيف يستطيع البدء.'); return; }
+      await update(ref(db, `rooms/${ROOM}`), { status:'playing', turnIndex: r.starterIndex || 0, prefix:'', secret:'', lastActor: null });
       log('بدأت اللعبة. ينتظر المبتدئ كتابة الاسم السري وبدء الجولة.');
     }
 
     async function startRoundFlow(){
-      const r = (await get(ref(db, `rooms/${ROOM}`))).val();
-      const order = r.order||[];
-      const starterUid = order[r.starterIndex];
-      if(starterUid!==UID){ alert('لست المبتدئ الحالي.'); return; }
+      const rSnap = await get(ref(db, `rooms/${ROOM}`));
+      const r = rSnap.val();
+      const order = r.order || Object.keys(r.players || {});
+      const starterUid = order[r.starterIndex] || order[0];
+      if(starterUid !== UID){ alert('لست المبتدئ الحالي.'); return; }
       const sec = (secretInput.value||'').trim();
       if(!sec || sec.length<2){ alert('اكتب اسمًا من حرفين أو أكثر.'); return; }
       const first = sec[0];
+      const orderLen = order.length || 1;
       await update(ref(db, `rooms/${ROOM}`), {
         secret: sec,
         prefix: first,
         lastActor: starterUid,
-        turnIndex: (r.starterIndex+1)%4,
+        turnIndex: (r.starterIndex + 1) % orderLen,
         challenge: null
       });
       appendLog(`${r.players[starterUid].name} بدأ جولة جديدة وأعلن أول حرف: <b>${first}</b>.`);
@@ -398,35 +457,40 @@
       const ch = (letterInput.value||'').trim();
       letterInput.value='';
       if(!ch || ch.length!==1){ alert('أدخل حرفًا واحدًا.'); return; }
-      const r = (await get(ref(db, `rooms/${ROOM}`))).val();
-      const order = r.order||[]; const myTurnUid = order[r.turnIndex];
-      if(myTurnUid!==UID){ alert('ليس دورك الآن.'); return; }
-      const expected = r.secret?.[r.prefix?.length] || '';
+      const rSnap = await get(ref(db, `rooms/${ROOM}`));
+      const r = rSnap.val();
+      const order = r.order || Object.keys(r.players || {});
+      const orderLen = order.length || 1;
+      const myTurnUid = order[r.turnIndex];
+      if(myTurnUid !== UID){ alert('ليس دورك الآن.'); return; }
+      const expected = (r.secret || '')[ (r.prefix || '').length ] || '';
       if(ch !== expected){
         await giveQuarterTo(UID, 'حرف خاطئ');
         return;
       }
       const newPrefix = (r.prefix||'') + ch;
+      const nextTurnIndex = (r.turnIndex + 1) % orderLen;
       await update(ref(db, `rooms/${ROOM}`), {
         prefix: newPrefix,
         lastActor: UID,
-        turnIndex: (r.turnIndex+1)%4,
+        turnIndex: nextTurnIndex,
       });
       appendLog(`${r.players[UID].name} أضاف الحرف <b>${ch}</b>.`);
 
-      if(newPrefix.length === r.secret.length){
-        const penalized = order[(r.turnIndex+1)%4];
+      if(newPrefix.length === (r.secret || '').length){
+        const penalized = order[ nextTurnIndex ];
         appendLog(`اكتمل الاسم (<b>${r.secret}</b>). ${r.players[penalized].name} يأخذ ربع قرد.`);
         await giveQuarterTo(penalized, 'الكلمة اكتملت');
       }
     }
 
     async function triggerDoubtFlow(){
-      const r = (await get(ref(db, `rooms/${ROOM}`))).val();
-      const order = r.order||[];
+      const rSnap = await get(ref(db, `rooms/${ROOM}`));
+      const r = rSnap.val();
+      const order = r.order || Object.keys(r.players || {});
       const challenger = order[r.turnIndex];
       const previous = r.lastActor;
-      if(challenger!==UID){ alert('يمكن قول "أشك" فقط في دورك.'); return; }
+      if(challenger !== UID){ alert('يمكن قول "أشك" فقط في دورك.'); return; }
       await update(ref(db, `rooms/${ROOM}/challenge`), {
         active: true,
         challenger, previous,
@@ -436,20 +500,25 @@
     }
 
     async function resolveChallenge(real){
-      const r = (await get(ref(db, `rooms/${ROOM}`))).val();
+      const rSnap = await get(ref(db, `rooms/${ROOM}`));
+      const r = rSnap.val();
       if(!r.challenge?.active){ return; }
       const target = real ? r.challenge.challenger : r.challenge.previous;
       await giveQuarterTo(target, real? 'تحدّي فاشل — الاسم حقيقي' : 'تحدّي ناجح — الاسم غير حقيقي');
     }
 
     async function giveQuarterTo(uid, reason){
+      // زيادة أرباع اللاعب المستهدف
       await runTransaction(ref(db, `rooms/${ROOM}/players/${uid}/quarters`), (q)=> (q||0)+1);
-      const r = (await get(ref(db, `rooms/${ROOM}`))).val();
-      const lose = (r.players[uid].quarters+1)>=4;
+      const rSnap = await get(ref(db, `rooms/${ROOM}`));
+      const r = rSnap.val();
+      const updatedQuarters = r.players?.[uid]?.quarters || 0;
+      const lose = updatedQuarters >= 4;
       appendLog(`<b>${r.players[uid].name}</b> حصل على <b>ربع قرد</b> (${reason}).`);
       if(lose){ alert(`${r.players[uid].name} جمع قرد كامل 🐒 — خسر اللعبة!`); }
-      const order = r.order||[];
-      const newStarter = order.indexOf(uid);
+
+      const order = r.order || Object.keys(r.players || {});
+      const newStarter = Math.max(0, order.indexOf(uid));
       await update(ref(db, `rooms/${ROOM}`), {
         starterIndex: newStarter,
         turnIndex: newStarter,
@@ -460,11 +529,19 @@
 
     async function leaveRoom(){
       if(!ROOM) return;
-      await remove(ref(db, `rooms/${ROOM}/players/${UID}`));
-      const rSnap = await get(ref(db, `rooms/${ROOM}/players`));
-      if(!rSnap.exists()){
-        await remove(ref(db, `rooms/${ROOM}`));
-      }
+      try{
+        await remove(ref(db, `rooms/${ROOM}/players/${UID}`));
+        // إزالة من order أيضاً
+        await runTransaction(ref(db, `rooms/${ROOM}/order`), (order)=>{
+          if(!Array.isArray(order)) return [];
+          return order.filter(id => id !== UID);
+        });
+        const rSnap = await get(ref(db, `rooms/${ROOM}/players`));
+        if(!rSnap.exists()){
+          await remove(ref(db, `rooms/${ROOM}`));
+        }
+      }catch(e){ console.warn('[leaveRoom] error', e); }
+
       ROOM = null; roomRef = null;
       roomCodeView.textContent = '—';
       playersEl.innerHTML = '';
@@ -478,9 +555,10 @@
     function appendLog(html){
       const time = new Date().toLocaleTimeString('ar-EG',{hour12:false});
       logBox.innerHTML = `<div class="tiny" style="color:#9fb1cf">[${time}]</div><div>${html}</div>` + logBox.innerHTML;
-      push(ref(db, `rooms/${ROOM}/log`), { t: serverTimestamp(), html });
+      if(ROOM) push(ref(db, `rooms/${ROOM}/log`), { t: serverTimestamp(), html });
     }
 
+    // —— أحداث ——
     createRoom.onclick = createRoomFlow;
     joinRoomBtn.onclick = ()=> joinRoom();
     leaveBtn.onclick = leaveRoom;
@@ -492,6 +570,7 @@
     confirmReal.onclick = ()=> resolveChallenge(true);
     confirmFake.onclick = ()=> resolveChallenge(false);
 
+    // لصق كود الغرفة من الرابط ?room=XXXXXX
     const params = new URLSearchParams(location.search);
     const preset = params.get('room');
     if(preset){ roomCodeInput.value = preset.toUpperCase(); }
